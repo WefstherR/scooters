@@ -1,0 +1,216 @@
+package cl.recibos.app.ui.editor
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import cl.recibos.app.data.repository.ReceiptRepository
+import cl.recibos.app.data.repository.SellerRepository
+import cl.recibos.app.domain.model.ClientInfo
+import cl.recibos.app.domain.model.PaymentMethod
+import cl.recibos.app.domain.model.PaymentStatus
+import cl.recibos.app.domain.model.Receipt
+import cl.recibos.app.domain.model.ReceiptItem
+import cl.recibos.app.domain.util.Clp
+import cl.recibos.app.domain.util.ReceiptValidator
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+
+/** Fila editable del formulario. Los montos se guardan como texto de dígitos. */
+data class ItemForm(
+    val key: Long,
+    val name: String = "",
+    val description: String = "",
+    val quantity: String = "1",
+    val unitPrice: String = "",
+) {
+    fun toItem() = ReceiptItem(
+        name = name,
+        description = description,
+        quantity = quantity.toIntOrNull() ?: 0,
+        unitPrice = Clp.parse(unitPrice) ?: 0,
+    )
+}
+
+data class EditorUiState(
+    val loading: Boolean = true,
+    val draftId: Long = 0,
+    val nextNumber: Int = 1,
+    val dateTime: LocalDateTime = LocalDateTime.now().withSecond(0).withNano(0),
+    val status: PaymentStatus = PaymentStatus.PAID,
+    val items: List<ItemForm> = listOf(ItemForm(key = 1)),
+    val discount: String = "",
+    val method: PaymentMethod = PaymentMethod.TRANSFER,
+    val reference: String = "",
+    val clientName: String = "",
+    val clientPhone: String = "",
+    val clientEmail: String = "",
+    val showErrors: Boolean = false,
+    val busy: Boolean = false,
+    val sellerConfigured: Boolean = true,
+) {
+    fun toReceipt(): Receipt = Receipt(
+        id = draftId,
+        dateTime = dateTime,
+        status = status,
+        client = ClientInfo(clientName, clientPhone, clientEmail),
+        items = items.map { it.toItem() },
+        discount = Clp.parse(discount) ?: 0,
+        paymentMethod = method,
+        paymentReference = if (method == PaymentMethod.CASH) "" else reference,
+    )
+
+    val validation: ReceiptValidator.Result get() = ReceiptValidator.validate(toReceipt())
+
+    /** Contenido comparable para saber si hay cambios sin guardar. */
+    fun contentKey(): Any = listOf(
+        dateTime, status, items.map { listOf(it.name, it.description, it.quantity, it.unitPrice) },
+        discount, method, reference, clientName, clientPhone, clientEmail,
+    )
+}
+
+sealed interface EditorEvent {
+    data class OpenPreview(val id: Long) : EditorEvent
+    data object Close : EditorEvent
+    data class Message(val text: String) : EditorEvent
+}
+
+class EditorViewModel(
+    private val receipts: ReceiptRepository,
+    private val seller: SellerRepository,
+    private val receiptId: Long,
+) : ViewModel() {
+
+    private val _state = MutableStateFlow(EditorUiState())
+    val state: StateFlow<EditorUiState> = _state.asStateFlow()
+
+    private val _events = Channel<EditorEvent>(Channel.BUFFERED)
+    val events = _events.receiveAsFlow()
+
+    private var savedKey: Any? = null
+    private var nextKey = 2L
+
+    init {
+        viewModelScope.launch {
+            val next = receipts.nextNumber()
+            val configured = seller.current().isConfigured
+            val draft = receiptId.takeIf { it != 0L }?.let { receipts.get(it) }?.takeIf { it.isDraft }
+            val initial = if (draft != null) {
+                EditorUiState(
+                    loading = false,
+                    draftId = draft.id,
+                    nextNumber = next,
+                    dateTime = draft.dateTime,
+                    status = if (draft.status == PaymentStatus.VOID) PaymentStatus.PAID else draft.status,
+                    items = draft.items.map { item ->
+                        ItemForm(
+                            key = nextKey++,
+                            name = item.name,
+                            description = item.description,
+                            quantity = item.quantity.toString(),
+                            unitPrice = item.unitPrice.takeIf { it > 0 }?.toString().orEmpty(),
+                        )
+                    }.ifEmpty { listOf(ItemForm(key = nextKey++)) },
+                    discount = draft.discount.takeIf { it > 0 }?.toString().orEmpty(),
+                    method = draft.paymentMethod,
+                    reference = draft.paymentReference,
+                    clientName = draft.client.name,
+                    clientPhone = draft.client.phone,
+                    clientEmail = draft.client.email,
+                    sellerConfigured = configured,
+                ).also { savedKey = it.contentKey() }
+            } else {
+                EditorUiState(
+                    loading = false,
+                    nextNumber = next,
+                    method = seller.lastPaymentMethod.first(),
+                    sellerConfigured = configured,
+                ).also { savedKey = it.contentKey() }
+            }
+            _state.value = initial
+        }
+    }
+
+    val hasUnsavedChanges: Boolean
+        get() = !_state.value.loading && _state.value.contentKey() != savedKey
+
+    val isExistingDraft: Boolean get() = _state.value.draftId != 0L
+
+    fun updateItem(key: Long, transform: (ItemForm) -> ItemForm) = _state.update { s ->
+        s.copy(items = s.items.map { if (it.key == key) transform(it) else it })
+    }
+
+    fun addItem() = _state.update { it.copy(items = it.items + ItemForm(key = nextKey++)) }
+
+    fun removeItem(key: Long) = _state.update { s ->
+        val remaining = s.items.filterNot { it.key == key }
+        s.copy(items = remaining.ifEmpty { listOf(ItemForm(key = nextKey++)) })
+    }
+
+    fun setDate(date: LocalDate) = _state.update { it.copy(dateTime = LocalDateTime.of(date, it.dateTime.toLocalTime())) }
+    fun setTime(time: LocalTime) = _state.update { it.copy(dateTime = LocalDateTime.of(it.dateTime.toLocalDate(), time)) }
+    fun setStatus(status: PaymentStatus) = _state.update { it.copy(status = status) }
+    fun setDiscount(value: String) = _state.update { it.copy(discount = value) }
+    fun setMethod(method: PaymentMethod) = _state.update { it.copy(method = method) }
+    fun setReference(value: String) = _state.update { it.copy(reference = value.take(60)) }
+    fun setClientName(value: String) = _state.update { it.copy(clientName = value.take(80)) }
+    fun setClientPhone(value: String) = _state.update { it.copy(clientPhone = value.filter { c -> c.isDigit() || c in "+ " }.take(20)) }
+    fun setClientEmail(value: String) = _state.update { it.copy(clientEmail = value.trim().take(80)) }
+
+    /** Valida, guarda el borrador y abre la vista previa. */
+    fun preview() {
+        val current = _state.value
+        if (current.busy) return
+        if (!current.validation.isValid) {
+            _state.update { it.copy(showErrors = true) }
+            viewModelScope.launch {
+                _events.send(EditorEvent.Message(current.validation.firstMessage ?: "Revisa los datos marcados."))
+            }
+            return
+        }
+        viewModelScope.launch {
+            persist()?.let { _events.send(EditorEvent.OpenPreview(it)) }
+        }
+    }
+
+    fun saveDraftAndClose() {
+        viewModelScope.launch {
+            if (persist() != null) {
+                _events.send(EditorEvent.Message("Borrador guardado"))
+                _events.send(EditorEvent.Close)
+            }
+        }
+    }
+
+    private suspend fun persist(): Long? {
+        _state.update { it.copy(busy = true) }
+        return try {
+            val snapshot = _state.value
+            val id = receipts.saveDraft(snapshot.toReceipt())
+            seller.rememberPaymentMethod(snapshot.method)
+            _state.update { it.copy(draftId = id, busy = false) }
+            savedKey = snapshot.contentKey()
+            id
+        } catch (e: Exception) {
+            _state.update { it.copy(busy = false) }
+            _events.send(EditorEvent.Message(e.message ?: "No se pudo guardar el borrador."))
+            null
+        }
+    }
+
+    fun deleteDraft() {
+        val id = _state.value.draftId
+        viewModelScope.launch {
+            if (id != 0L) receipts.deleteDraft(id)
+            _events.send(EditorEvent.Message("Borrador eliminado"))
+            _events.send(EditorEvent.Close)
+        }
+    }
+}
