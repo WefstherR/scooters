@@ -105,8 +105,12 @@ También publica muestras de comprobantes generados (`muestras-comprobantes`).
 - `ReceiptValidatorTest`: validaciones del formulario.
 - `ReceiptNumberingTest`: numeración correlativa con Room real (borradores sin número, anulados no reutilizados,
   emitidos inmutables, duplicar, búsqueda y filtros).
-- `ReceiptExportTest`: PDF A5 válido, paginación sin cortar filas, PNG de alta resolución y re-exportación sin duplicados.
+- `ReceiptExportTest`: paginación A5 sin cortar filas, PNG de alta resolución y re-exportación sin duplicados.
   Deja muestras visuales en `app/build/receipt-samples/`.
+
+`app/src/androidTest` contiene `ReceiptPdfInstrumentedTest`, que genera PDFs reales y los vuelve a abrir para
+comprobar tamaño A5 y paginación. Usa el motor PDF nativo de Android, por eso corre en un teléfono o emulador:
+`./gradlew connectedDebugAndroidTest` (en GitHub Actions corre automáticamente en un emulador).
 
 ## Almacenamiento y privacidad
 

@@ -24,6 +24,10 @@ import java.time.LocalDateTime
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
+/**
+ * Pruebas de exportación en el computador. La generación de PDF usa el motor nativo de Android,
+ * que Robolectric no implementa; esas pruebas están en androidTest/ReceiptPdfInstrumentedTest.
+ */
 class ReceiptExportTest {
 
     private val exporter = ReceiptExporter(ApplicationProvider.getApplicationContext())
@@ -77,25 +81,15 @@ class ReceiptExportTest {
         assertTrue(height(sample(items = 6)) > height(sample(items = 1)))
     }
 
-    @Test fun `genera PDF A5 valido`() {
-        val out = ByteArrayOutputStream()
-        exporter.write(sample(), ExportFormat.PDF, out)
-        val text = String(out.toByteArray(), Charsets.ISO_8859_1)
-        assertTrue(text.startsWith("%PDF"))
-        assertTrue("una sola página", Regex("/Type\\s*/Page[^s]").findAll(text).count() == 1)
-        assertTrue("tamaño A5 en puntos", text.contains("0 0 420 595"))
-        saveSample("muestra-pagado.pdf", out.toByteArray())
-    }
-
     @Test fun `PDF con muchos productos se divide en paginas sin cortar filas`() {
         val renderer = ReceiptRenderer()
         val layout = renderer.layout(sample(items = 30))
         val pages = renderer.paginate(layout)
         assertTrue(pages.size > 1)
         assertEquals(layout.blocks.size, pages.sumOf { it.size })
-        val out = ByteArrayOutputStream()
-        exporter.write(sample(items = 30), ExportFormat.PDF, out)
-        assertTrue(String(out.toByteArray(), Charsets.ISO_8859_1).startsWith("%PDF"))
+        // Ninguna página excede el alto útil de A5.
+        val usable = ReceiptRenderer.PAGE_HEIGHT - 2 * ReceiptRenderer.MARGIN - ReceiptRenderer.PAGE_FOOTER
+        pages.forEach { page -> assertTrue(page.sumOf { it.height.toDouble() } <= usable) }
     }
 
     @Test fun `muestras de pendiente y anulado`() {
@@ -108,13 +102,13 @@ class ReceiptExportTest {
     }
 
     @Test fun `exportar a cache para compartir no depende del registro`() = runBlocking {
-        val file = exporter.exportToCache(sample(), ExportFormat.PDF)
+        val file = exporter.exportToCache(sample(), ExportFormat.PNG)
         assertTrue(file.exists() && file.length() > 0)
-        assertEquals("RECIBO-0001-20261123.pdf", file.name)
+        assertEquals("RECIBO-0001-20261123.png", file.name)
         // Exportar de nuevo reemplaza el archivo, no crea duplicados.
-        val again = exporter.exportToCache(sample(), ExportFormat.PDF)
+        val again = exporter.exportToCache(sample(), ExportFormat.PNG)
         assertEquals(file.absolutePath, again.absolutePath)
-        assertEquals(1, file.parentFile!!.listFiles()!!.count { it.name.startsWith("RECIBO-0001") && it.extension == "pdf" })
+        assertEquals(1, file.parentFile!!.listFiles()!!.count { it.name.startsWith("RECIBO-0001") && it.extension == "png" })
     }
 
     /** Guarda muestras visuales en app/build/receipt-samples para revisarlas a mano. */

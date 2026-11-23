@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Respaldo automático de Android: comprobantes (base de datos), datos del vendedor y logos. -->
 <full-backup-content>
-    <exclude domain="cache" path="." />
+    <include domain="database" path="." />
+    <include domain="file" path="." />
+    <include domain="sharedpref" path="." />
 </full-backup-content>
