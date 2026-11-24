@@ -71,7 +71,7 @@ class ReceiptViewModel(
                 }
                 val next = receipts.nextNumber()
                 _state.update { it.copy(loading = false, receipt = receipt, nextNumber = next, seller = profile) }
-                val bitmap = runCatching { exporter.preview(receipt, PREVIEW_WIDTH, next) }.getOrNull()
+                val bitmap = runCatching { exporter.preview(receipt, PREVIEW_WIDTH, receipt.reservedNumber ?: next) }.getOrNull()
                 _state.update { it.copy(preview = bitmap) }
             }
         }
@@ -83,7 +83,7 @@ class ReceiptViewModel(
     fun issue() = runBusy {
         val profile = seller.current()
         val issued = receipts.issue(receiptId, profile.toSnapshot())
-        seller.rememberPaymentMethod(issued.paymentMethod)
+        seller.rememberPaymentMethod(issued.primaryMethod)
         _events.send(ReceiptEvent.Issued)
     }
 
@@ -99,6 +99,12 @@ class ReceiptViewModel(
 
     fun duplicate() = runBusy {
         val id = receipts.duplicateAsDraft(receiptId)
+        _events.send(ReceiptEvent.OpenDraft(id))
+    }
+
+    /** Borra el comprobante emitido y abre un borrador con sus datos que conservará el mismo número. */
+    fun deleteAndRedo() = runBusy {
+        val id = receipts.deleteAndRedo(receiptId)
         _events.send(ReceiptEvent.OpenDraft(id))
     }
 

@@ -319,7 +319,7 @@ private fun ReceiptRow(receipt: Receipt, onClick: () -> Unit) {
                 val headline = receipt.client.name.ifBlank { null }?.let { "$it · $products" } ?: products
                 Text(headline, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    DateFormats.dateTime(receipt.dateTime) + " · " + receipt.paymentMethod.label,
+                    DateFormats.dateTime(receipt.dateTime) + " · " + receipt.paymentSummary,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

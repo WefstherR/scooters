@@ -75,7 +75,7 @@ import cl.recibos.app.ui.components.ConfirmDialog
 import cl.recibos.app.ui.components.SectionCard
 import cl.recibos.app.ui.components.StatusBadge
 
-private enum class PendingConfirm { ISSUE, VOID, MARK_PAID, DELETE }
+private enum class PendingConfirm { ISSUE, VOID, MARK_PAID, DELETE, REDO }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -167,6 +167,11 @@ fun ReceiptScreen(
                                     leadingIcon = { Icon(painterResource(R.drawable.ic_copy), null) },
                                     onClick = { menu = false; vm.duplicate() },
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Borrar y rehacer N.º ${ReceiptNumber.format(receipt.number ?: 0)}") },
+                                    leadingIcon = { Icon(Icons.Default.Edit, null) },
+                                    onClick = { menu = false; confirm = PendingConfirm.REDO },
+                                )
                                 if (receipt.status != PaymentStatus.VOID) {
                                     DropdownMenuItem(
                                         text = { Text("Anular comprobante", color = MaterialTheme.colorScheme.error) },
@@ -255,11 +260,11 @@ fun ReceiptScreen(
     when (confirm) {
         PendingConfirm.ISSUE -> if (r != null) {
             val amount = Clp.format(r.totals.total)
-            val number = ReceiptNumber.format(state.nextNumber)
+            val number = ReceiptNumber.format(r.reservedNumber ?: state.nextNumber)
             ConfirmDialog(
                 title = if (r.status == PaymentStatus.PAID) "¿Confirmas que recibiste el pago?" else "Emitir como pendiente",
                 message = if (r.status == PaymentStatus.PAID) {
-                    "Declaras haber recibido $amount mediante ${r.paymentMethod.label.lowercase()}. " +
+                    "Declaras haber recibido $amount mediante ${paymentPhrase(r)}. " +
                         "Se asignará el N.º $number y el comprobante ya no podrá editarse."
                 } else {
                     "Se emitirá el N.º $number por $amount con pago pendiente. El comprobante no indicará que recibiste dinero."
@@ -278,6 +283,19 @@ fun ReceiptScreen(
             onConfirm = { confirm = null; vm.void() },
             onDismiss = { confirm = null },
         )
+        PendingConfirm.REDO -> if (r != null) {
+            val number = ReceiptNumber.format(r.number ?: 0)
+            ConfirmDialog(
+                title = "¿Borrar y rehacer el N.º $number?",
+                message = "El comprobante se eliminará del historial y se abrirá un borrador con sus mismos datos para " +
+                    "corregirlo. Al emitirlo recuperará el N.º $number.\n\nSi ya lo compartiste, el cliente conservará " +
+                    "la versión anterior. Si solo quieres dejarlo sin efecto, usa «Anular».",
+                confirmText = "Borrar y rehacer",
+                destructive = true,
+                onConfirm = { confirm = null; vm.deleteAndRedo() },
+                onDismiss = { confirm = null },
+            )
+        }
         PendingConfirm.MARK_PAID -> ConfirmDialog(
             title = "¿Confirmas que recibiste el pago?",
             message = "El comprobante pasará a estado PAGADO y su total se mostrará como recibido.",
@@ -287,7 +305,12 @@ fun ReceiptScreen(
         )
         PendingConfirm.DELETE -> ConfirmDialog(
             title = "¿Eliminar borrador?",
-            message = "El borrador se eliminará. No afecta la numeración de los comprobantes.",
+            message = if (r?.reservedNumber != null) {
+                "El borrador se eliminará y el N.º ${ReceiptNumber.format(r.reservedNumber)} quedará sin usar " +
+                    "(si era el último, lo tomará el próximo comprobante)."
+            } else {
+                "El borrador se eliminará. No afecta la numeración de los comprobantes."
+            },
             confirmText = "Eliminar",
             destructive = true,
             onConfirm = { confirm = null; vm.deleteDraft() },
@@ -394,4 +417,12 @@ private fun ActionButton(label: String, icon: Painter, enabled: Boolean, modifie
         Icon(icon, null, Modifier.size(18.dp))
         Text("  $label", maxLines = 1)
     }
+}
+
+/** "transferencia bancaria" o "transferencia bancaria ($150.000) y efectivo ($65.000)". */
+private fun paymentPhrase(r: Receipt): String {
+    val parts = r.resolvedPayments
+    if (parts.size == 1) return parts.first().method.label.lowercase()
+    val described = parts.map { "${it.method.label.lowercase()} (${Clp.format(it.amount)})" }
+    return described.dropLast(1).joinToString(", ") + " y " + described.last()
 }

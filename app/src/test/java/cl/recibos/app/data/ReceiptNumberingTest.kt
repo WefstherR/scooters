@@ -8,6 +8,7 @@ import cl.recibos.app.data.repository.ReceiptFilter
 import cl.recibos.app.data.repository.ReceiptRepository
 import cl.recibos.app.domain.model.ClientInfo
 import cl.recibos.app.domain.model.PaymentMethod
+import cl.recibos.app.domain.model.PaymentPart
 import cl.recibos.app.domain.model.PaymentStatus
 import cl.recibos.app.domain.model.Receipt
 import cl.recibos.app.domain.model.ReceiptItem
@@ -52,7 +53,7 @@ class ReceiptNumberingTest {
         status = status,
         client = ClientInfo(name = client),
         items = listOf(ReceiptItem(product, "Modelo E9", 1, 215_000)),
-        paymentMethod = method,
+        payments = listOf(PaymentPart(method)),
     )
 
     private suspend fun issueNew(r: Receipt = draft()) = repo.issue(repo.saveDraft(r), seller)
@@ -118,6 +119,60 @@ class ReceiptNumberingTest {
         assertNull(copy.number)
         assertEquals("Ana", copy.client.name)
         assertEquals(issued.items, copy.items)
+    }
+
+    @Test fun `borrar y rehacer recupera el mismo numero`() = runBlocking {
+        issueNew()
+        val second = issueNew(draft(client = "Ana", product = "Casco"))
+        issueNew()
+        val redoId = repo.deleteAndRedo(second.id)
+        assertNull(repo.get(second.id))
+        val redo = repo.get(redoId)!!
+        assertTrue(redo.isDraft)
+        assertEquals(2, redo.reservedNumber)
+        assertEquals("Ana", redo.client.name)
+        assertEquals(second.dateTime, redo.dateTime)
+        // Mientras tanto, un comprobante nuevo sigue la numeración normal.
+        assertEquals(4, issueNew().number)
+        // Al emitir el borrador recupera el N.º 0002 y el contador no retrocede.
+        assertEquals(2, repo.issue(redoId, seller).number)
+        assertEquals(5, repo.nextNumber())
+    }
+
+    @Test fun `rehacer el ultimo y descartar el borrador libera el numero`() = runBlocking {
+        issueNew()
+        val last = issueNew()
+        val redoId = repo.deleteAndRedo(last.id)
+        assertEquals(3, repo.nextNumber()) // el 2 está reservado por el borrador
+        repo.deleteDraft(redoId)
+        assertEquals(2, repo.nextNumber()) // era el último: se reutiliza
+        assertEquals(2, issueNew().number)
+    }
+
+    @Test fun `descartar un rehacer intermedio deja el numero sin usar`() = runBlocking {
+        val first = issueNew()
+        issueNew()
+        repo.deleteDraft(repo.deleteAndRedo(first.id))
+        assertEquals(3, issueNew().number)
+    }
+
+    @Test fun `pago dividido y rut se guardan y se filtran por cualquier medio`() = runBlocking {
+        val split = draft(client = "Ana").copy(
+            client = ClientInfo(name = "Ana", rut = "12.345.678-5"),
+            payments = listOf(PaymentPart(PaymentMethod.TRANSFER, 150_000, "OP-1"), PaymentPart(PaymentMethod.CASH, 65_000)),
+        )
+        val issued = issueNew(split)
+        val stored = repo.get(issued.id)!!
+        assertEquals(split.payments, stored.payments)
+        assertEquals("12.345.678-5", stored.client.rut)
+        assertEquals(listOf(1), repo.observe(ReceiptFilter(method = PaymentMethod.CASH)).first().map { it.number })
+        assertEquals(listOf(1), repo.observe(ReceiptFilter(method = PaymentMethod.TRANSFER)).first().map { it.number })
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun `no se emite un pago dividido que no cuadra con el total`() = runBlocking {
+        issueNew(draft().copy(payments = listOf(PaymentPart(PaymentMethod.TRANSFER, 100_000), PaymentPart(PaymentMethod.CASH, 10_000))))
+        Unit
     }
 
     @Test fun `buscar por numero, cliente o producto y filtrar`() = runBlocking {

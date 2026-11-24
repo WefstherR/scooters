@@ -24,7 +24,8 @@ interface ReceiptDao {
         SELECT * FROM receipts
         WHERE (:from IS NULL OR date_time >= :from)
           AND (:to IS NULL OR date_time < :to)
-          AND (:method IS NULL OR payment_method = :method)
+          AND (:method IS NULL OR payment_method = :method
+               OR id IN (SELECT receipt_id FROM receipt_payments WHERE method = :method))
           AND (
                 (:query = '' AND :number IS NULL)
                 OR (:number IS NOT NULL AND number = :number)
@@ -58,8 +59,20 @@ interface ReceiptDao {
     @Query("DELETE FROM receipt_items WHERE receipt_id = :receiptId")
     suspend fun deleteItems(receiptId: Long)
 
+    @Insert
+    suspend fun insertPayments(payments: List<ReceiptPaymentEntity>)
+
+    @Query("DELETE FROM receipt_payments WHERE receipt_id = :receiptId")
+    suspend fun deletePayments(receiptId: Long)
+
     @Query("DELETE FROM receipts WHERE id = :id AND is_draft = 1")
     suspend fun deleteDraft(id: Long): Int
+
+    @Query("DELETE FROM receipts WHERE id = :id")
+    suspend fun deleteReceipt(id: Long): Int
+
+    @Query("SELECT COUNT(*) FROM receipts WHERE number = :number")
+    suspend fun countWithNumber(number: Int): Int
 
     @Query("SELECT value FROM counters WHERE name = :name")
     suspend fun getCounter(name: String): Int?

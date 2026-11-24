@@ -84,6 +84,9 @@ import cl.recibos.app.domain.model.PaymentStatus
 import cl.recibos.app.domain.util.Clp
 import cl.recibos.app.domain.util.DateFormats
 import cl.recibos.app.domain.util.ReceiptNumber
+import cl.recibos.app.domain.util.ReceiptValidator
+import cl.recibos.app.domain.util.Rut
+import cl.recibos.app.ui.theme.StatusColors
 import cl.recibos.app.ui.components.MoneyField
 import cl.recibos.app.ui.components.SectionCard
 import java.time.Instant
@@ -129,7 +132,8 @@ fun EditorScreen(
                     Column {
                         Text(if (state.draftId != 0L) "Editar borrador" else "Nuevo comprobante")
                         Text(
-                            "N.º ${ReceiptNumber.format(state.nextNumber)} · se asigna al emitir",
+                            state.reservedNumber?.let { "N.º ${ReceiptNumber.format(it)} · rehaciendo comprobante borrado" }
+                                ?: "N.º ${ReceiptNumber.format(state.nextNumber)} · se asigna al emitir",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -201,7 +205,14 @@ fun EditorScreen(
         AlertDialog(
             onDismissRequest = { deleteDialog = false },
             title = { Text("¿Eliminar borrador?") },
-            text = { Text("El borrador se eliminará. No afecta la numeración de los comprobantes.") },
+            text = {
+                Text(
+                    state.reservedNumber?.let {
+                        "El borrador se eliminará y el N.º ${ReceiptNumber.format(it)} quedará sin usar " +
+                            "(si era el último, lo tomará el próximo comprobante)."
+                    } ?: "El borrador se eliminará. No afecta la numeración de los comprobantes.",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { deleteDialog = false; vm.deleteDraft() }) {
                     Text("Eliminar", color = MaterialTheme.colorScheme.error)
@@ -395,41 +406,103 @@ private fun Modifier.clickableStep(onClick: () -> Unit): Modifier = clickable(on
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PaymentSection(state: EditorUiState, vm: EditorViewModel) {
-    SectionCard(title = "Método de pago") {
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            PaymentMethod.entries.forEachIndexed { index, method ->
-                SegmentedButton(
-                    selected = state.method == method,
-                    onClick = { vm.setMethod(method) },
-                    shape = SegmentedButtonDefaults.itemShape(index, PaymentMethod.entries.size),
-                    icon = {},
-                    label = {
-                        Text(
-                            when (method) {
-                                PaymentMethod.CASH -> "Efectivo"
-                                PaymentMethod.TRANSFER -> "Transferencia"
-                                PaymentMethod.PAYMENT_LINK -> "Link de pago"
-                            },
-                            maxLines = 1,
-                        )
-                    },
+    val paymentError = if (state.showErrors) state.validation.paymentError else null
+    SectionCard(title = if (state.isSplit) "Forma de pago · ${state.payments.size} medios" else "Método de pago") {
+        if (!state.isSplit) {
+            val part = state.payments.first()
+            MethodSelector(selected = part.method, onSelect = { vm.setPaymentMethod(part.key, it) })
+            AnimatedVisibility(visible = part.method != PaymentMethod.CASH) {
+                OutlinedTextField(
+                    value = part.reference,
+                    onValueChange = { vm.setPaymentReference(part.key, it) },
+                    label = { Text("N.º de operación o referencia (opcional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
-        }
-        AnimatedVisibility(visible = state.method != PaymentMethod.CASH) {
-            OutlinedTextField(
-                value = state.reference,
-                onValueChange = vm::setReference,
-                label = { Text("N.º de operación o referencia (opcional)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+            TextButton(onClick = vm::addPaymentPart) {
+                Icon(Icons.Default.Add, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Dividir el pago en 2 o 3 medios")
+            }
+        } else {
+            state.payments.forEachIndexed { index, part ->
+                key(part.key) {
+                    if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Medio ${index + 1}", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                            IconButton(onClick = { vm.removePaymentPart(part.key) }) {
+                                Icon(Icons.Default.Close, "Quitar medio ${index + 1}")
+                            }
+                        }
+                        MethodSelector(selected = part.method, onSelect = { vm.setPaymentMethod(part.key, it) })
+                        MoneyField(
+                            value = part.amount,
+                            onValueChange = { vm.setPaymentAmount(part.key, it) },
+                            label = "Monto en ${part.method.shortLabel.lowercase()}",
+                            isError = paymentError != null && (Clp.parse(part.amount) ?: 0) <= 0,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (state.unassigned > 0) {
+                            TextButton(onClick = { vm.fillRemaining(part.key) }) {
+                                Text("Asignar saldo de ${Clp.format(state.unassigned)} aquí")
+                            }
+                        }
+                        AnimatedVisibility(visible = part.method != PaymentMethod.CASH) {
+                            OutlinedTextField(
+                                value = part.reference,
+                                onValueChange = { vm.setPaymentReference(part.key, it) },
+                                label = { Text("N.º de operación (opcional)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            }
+            val unassigned = state.unassigned
+            Text(
+                when {
+                    unassigned > 0 -> "Falta asignar ${Clp.format(unassigned)}"
+                    unassigned < 0 -> "Asignaste ${Clp.format(-unassigned)} de más"
+                    else -> "Montos completos ✓"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (unassigned == 0L) StatusColors.paid else MaterialTheme.colorScheme.error,
             )
+            if (state.payments.size < ReceiptValidator.MAX_PAYMENT_PARTS) {
+                TextButton(onClick = vm::addPaymentPart) {
+                    Icon(Icons.Default.Add, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Agregar otro medio")
+                }
+            }
+        }
+        if (paymentError != null) {
+            Text(paymentError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
         Text(
-            "Solo se registra el método declarado. La app no procesa ni verifica pagos.",
+            "Solo se registra lo declarado. La app no procesa ni verifica pagos.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MethodSelector(selected: PaymentMethod, onSelect: (PaymentMethod) -> Unit) {
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        PaymentMethod.entries.forEachIndexed { index, method ->
+            SegmentedButton(
+                selected = selected == method,
+                onClick = { onSelect(method) },
+                shape = SegmentedButtonDefaults.itemShape(index, PaymentMethod.entries.size),
+                icon = {},
+                label = { Text(if (method == PaymentMethod.TRANSFER) "Transferencia" else method.shortLabel, maxLines = 1) },
+            )
+        }
     }
 }
 
@@ -502,9 +575,10 @@ private fun ReceiptDataSection(state: EditorUiState, vm: EditorViewModel) {
 
 @Composable
 private fun ClientSection(state: EditorUiState, vm: EditorViewModel) {
-    var expanded by rememberSaveable { mutableStateOf(state.clientName.isNotBlank() || state.clientPhone.isNotBlank() || state.clientEmail.isNotBlank()) }
+    var expanded by rememberSaveable { mutableStateOf(!state.toReceipt().client.isEmpty) }
     val emailError = if (state.showErrors) state.validation.emailError else null
-    LaunchedEffect(emailError) { if (emailError != null) expanded = true }
+    val hasRutError = state.showErrors && state.validation.rutError != null
+    LaunchedEffect(emailError, hasRutError) { if (emailError != null || hasRutError) expanded = true }
     SectionCard(
         title = "Cliente (opcional)",
         trailing = {
@@ -518,7 +592,10 @@ private fun ClientSection(state: EditorUiState, vm: EditorViewModel) {
     ) {
         if (!expanded) {
             Text(
-                state.clientName.ifBlank { "Sin datos del cliente" },
+                listOf(state.clientName.trim(), Rut.format(state.clientRut))
+                    .filter { it.isNotBlank() }
+                    .joinToString(" · ")
+                    .ifBlank { "Sin datos del cliente" },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -531,6 +608,26 @@ private fun ClientSection(state: EditorUiState, vm: EditorViewModel) {
                     label = { Text("Nombre") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words, imeAction = ImeAction.Next),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                val rutError = if (state.showErrors) state.validation.rutError else null
+                OutlinedTextField(
+                    value = state.clientRut,
+                    onValueChange = vm::setClientRut,
+                    label = { Text("RUT (opcional)") },
+                    placeholder = { Text("12.345.678-5") },
+                    singleLine = true,
+                    isError = rutError != null,
+                    supportingText = when {
+                        rutError != null -> { { Text(rutError) } }
+                        state.clientRut.length >= 2 && Rut.isValid(state.clientRut) -> { { Text("RUT válido · ${Rut.format(state.clientRut)}") } }
+                        else -> null
+                    },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Ascii,
+                        capitalization = KeyboardCapitalization.Characters,
+                        imeAction = ImeAction.Next,
+                    ),
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(

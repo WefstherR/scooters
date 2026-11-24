@@ -12,10 +12,11 @@ App nativa para Android que permite a un vendedor particular registrar una venta
 | --- | --- |
 | Inicio | Botón «Nuevo comprobante», resumen (recibido, pendiente, emitidos), historial, buscador por número/cliente/producto, filtros por fecha y método de pago |
 | Comprobante | Numeración correlativa automática (0001, 0002…), fecha y hora editables, estado Pagado/Pendiente, varios productos, descuento fijo, totales automáticos en CLP |
-| Pago | Efectivo, transferencia o link de pago + N.º de operación opcional. «Pagado» exige confirmación manual |
+| Cliente | Nombre, RUT (validado con dígito verificador), teléfono/WhatsApp y correo; todos opcionales |
+| Pago | Efectivo, transferencia o link de pago, o **pago dividido en 2 o 3 medios** (ej. transferencia + efectivo) con el monto de cada uno; N.º de operación opcional. «Pagado» exige confirmación manual |
 | Diseño | Mismo diseño en PDF (A5 vertical) y PNG (1440 px de ancho, alto según contenido). Logo opcional y color de acento |
 | Entrega | Descargar PDF/PNG en `Descargas/Recibos`, compartir por WhatsApp, correo o Android Sharesheet. Nada se envía solo |
-| Historial | Volver a exportar sin duplicar, duplicar como nuevo, anular conservando el número, editar borradores, marcar pendiente como pagado |
+| Historial | Volver a exportar sin duplicar, duplicar como nuevo, anular conservando el número, **borrar y rehacer con el mismo número**, editar borradores, marcar pendiente como pagado |
 | Vendedor | Nombre comercial, logo, teléfono, correo, mensaje de agradecimiento y apariencia. Cada recibo emitido guarda una copia de estos datos |
 
 **Flujo principal:** Inicio → Nuevo comprobante → Completar datos → Vista previa → Confirmar y emitir → Descargar o compartir.
@@ -25,7 +26,13 @@ App nativa para Android que permite a un vendedor particular registrar una venta
 - El número se asigna **al emitir** (los borradores no consumen números) dentro de una transacción de base de datos.
   Un número nunca se repite ni se reutiliza, aunque el comprobante se anule.
 - Un comprobante emitido **no se puede editar**: solo cambiar su estado (anular o marcar como pagado).
-  Para corregir, se anula y se duplica.
+- Para corregirlo hay dos caminos:
+  - **Anular**: queda en el historial marcado como ANULADO y su número no se reutiliza.
+  - **Borrar y rehacer**: se elimina y se abre un borrador con sus mismos datos (y fecha) que, al emitirse,
+    recupera el mismo número. Si ese borrador se descarta y era el último número, lo toma el próximo comprobante;
+    si era un número intermedio, queda sin usar.
+- Pago dividido: entre 2 y 3 medios distintos, cada uno con monto mayor a cero, y la suma debe ser igual al total.
+- Las actualizaciones de la base de datos se hacen con migraciones: al instalar una versión nueva se conservan los comprobantes.
 - Con estado **Pendiente** el recibo dice «TOTAL PENDIENTE» y su texto legal aclara que no acredita la recepción de dinero.
 - Montos en pesos chilenos, enteros, con punto de miles: `$215.000`.
 
@@ -102,9 +109,11 @@ También publica muestras de comprobantes generados (`muestras-comprobantes`).
 
 - `ReceiptCalculatorTest`: subtotales, descuentos, límites y desbordes.
 - `FormattersTest`: formato CLP, número `0001`, nombre `RECIBO-0001-20261123.pdf`, teléfono → WhatsApp.
-- `ReceiptValidatorTest`: validaciones del formulario.
+- `ReceiptValidatorTest`: validaciones del formulario, RUT y pago dividido.
+- `RutTest`: dígito verificador y formato del RUT.
+- `MigrationTest`: actualizar desde la versión anterior conserva los comprobantes.
 - `ReceiptNumberingTest`: numeración correlativa con Room real (borradores sin número, anulados no reutilizados,
-  emitidos inmutables, duplicar, búsqueda y filtros).
+  emitidos inmutables, duplicar, borrar y rehacer, pago dividido, búsqueda y filtros).
 - `ReceiptExportTest`: paginación A5 sin cortar filas, PNG de alta resolución y re-exportación sin duplicados.
   Deja muestras visuales en `app/build/receipt-samples/`.
 

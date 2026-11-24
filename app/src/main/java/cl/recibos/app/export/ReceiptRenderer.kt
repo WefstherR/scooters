@@ -56,6 +56,7 @@ class ReceiptRenderer(
         val sellerContact = listOf(receipt.seller.phone, receipt.seller.email).filter { it.isNotBlank() }
         if (sellerContact.isNotEmpty()) blocks += infoRow("Contacto", sellerContact.joinToString(" · "))
         if (receipt.client.name.isNotBlank()) blocks += infoRow("Cliente", receipt.client.name.trim())
+        if (receipt.client.rut.isNotBlank()) blocks += infoRow("RUT cliente", receipt.client.rut.trim())
         blocks += divider()
 
         // DETALLE DE VENTA
@@ -79,8 +80,18 @@ class ReceiptRenderer(
             PaymentStatus.VOID -> "TOTAL (ANULADO)"
         }
         blocks += total(totalLabel, Clp.format(totals.total), voided = receipt.status == PaymentStatus.VOID)
-        blocks += infoRow("Método de pago", receipt.paymentMethod.label)
-        if (receipt.paymentReference.isNotBlank()) blocks += infoRow("N.º operación", receipt.paymentReference.trim())
+        if (receipt.isSplitPayment) {
+            // Pago dividido: cada medio con su monto y su referencia.
+            blocks += infoRow("Forma de pago", "Pago dividido en ${receipt.payments.size} medios")
+            receipt.resolvedPayments.forEach { part ->
+                blocks += paymentRow(part.method.label, Clp.format(part.amount), part.reference.trim().takeIf { it.isNotEmpty() })
+            }
+            blocks += spacer(2f)
+        } else {
+            val part = receipt.resolvedPayments.first()
+            blocks += infoRow("Método de pago", part.method.label)
+            if (part.reference.isNotBlank()) blocks += infoRow("N.º operación", part.reference.trim())
+        }
         blocks += statusRow(receipt.status)
         blocks += divider()
 
@@ -223,6 +234,24 @@ class ReceiptRenderer(
             val baseline = nameLayout.getLineBaseline(0).toFloat()
             drawText(amount, CONTENT_WIDTH - amountWidth, baseline, amountPaint)
             save(); translate(0f, nameLayout.height + 2f); detailLayout.draw(this); restore()
+        }
+    }
+
+    /** Fila de un medio dentro de un pago dividido: "Transferencia bancaria ··· $150.000". */
+    private fun paymentRow(method: String, amount: String, reference: String?): Block {
+        val indent = LABEL_WIDTH + 8f
+        val amountPaint = textPaint(9.5f, INK, medium = true)
+        val amountWidth = amountPaint.measureText(amount)
+        val textWidth = CONTENT_WIDTH - indent - amountWidth - 10f
+        val methodLayout = textLayout(method, textPaint(9.5f, INK), textWidth)
+        val refLayout = reference?.let { textLayout("Op. $it", textPaint(8.5f, MUTED), textWidth) }
+        val height = methodLayout.height + (refLayout?.let { it.height + 1f } ?: 0f) + 5f
+        return Block(height) {
+            save(); translate(indent, 0f)
+            methodLayout.draw(this)
+            if (refLayout != null) { translate(0f, methodLayout.height + 1f); refLayout.draw(this) }
+            restore()
+            drawText(amount, CONTENT_WIDTH - amountWidth, methodLayout.getLineBaseline(0).toFloat(), amountPaint)
         }
     }
 

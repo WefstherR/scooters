@@ -6,11 +6,13 @@ import cl.recibos.app.data.repository.ReceiptRepository
 import cl.recibos.app.data.repository.SellerRepository
 import cl.recibos.app.domain.model.ClientInfo
 import cl.recibos.app.domain.model.PaymentMethod
+import cl.recibos.app.domain.model.PaymentPart
 import cl.recibos.app.domain.model.PaymentStatus
 import cl.recibos.app.domain.model.Receipt
 import cl.recibos.app.domain.model.ReceiptItem
 import cl.recibos.app.domain.util.Clp
 import cl.recibos.app.domain.util.ReceiptValidator
+import cl.recibos.app.domain.util.Rut
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +41,20 @@ data class ItemForm(
     )
 }
 
+/** Un medio dentro de la forma de pago. El monto solo se usa con pago dividido. */
+data class PaymentForm(
+    val key: Long,
+    val method: PaymentMethod,
+    val amount: String = "",
+    val reference: String = "",
+) {
+    fun toPart() = PaymentPart(
+        method = method,
+        amount = Clp.parse(amount) ?: 0,
+        reference = if (method == PaymentMethod.CASH) "" else reference,
+    )
+}
+
 data class EditorUiState(
     val loading: Boolean = true,
     val draftId: Long = 0,
@@ -47,11 +63,12 @@ data class EditorUiState(
     val status: PaymentStatus = PaymentStatus.PAID,
     val items: List<ItemForm> = listOf(ItemForm(key = 1)),
     val discount: String = "",
-    val method: PaymentMethod = PaymentMethod.TRANSFER,
-    val reference: String = "",
+    val payments: List<PaymentForm> = listOf(PaymentForm(key = 1, method = PaymentMethod.TRANSFER)),
+    val reservedNumber: Int? = null,
     val clientName: String = "",
     val clientPhone: String = "",
     val clientEmail: String = "",
+    val clientRut: String = "",
     val showErrors: Boolean = false,
     val busy: Boolean = false,
     val sellerConfigured: Boolean = true,
@@ -60,19 +77,29 @@ data class EditorUiState(
         id = draftId,
         dateTime = dateTime,
         status = status,
-        client = ClientInfo(clientName, clientPhone, clientEmail),
+        client = ClientInfo(clientName, clientPhone, clientEmail, Rut.format(clientRut)),
         items = items.map { it.toItem() },
         discount = Clp.parse(discount) ?: 0,
-        paymentMethod = method,
-        paymentReference = if (method == PaymentMethod.CASH) "" else reference,
+        payments = payments.map { it.toPart() },
+        reservedNumber = reservedNumber,
     )
+
+    val isSplit: Boolean get() = payments.size > 1
+
+    /** Número que tendrá al emitirse. */
+    val displayNumber: Int get() = reservedNumber ?: nextNumber
+
+    /** Monto aún sin asignar en un pago dividido (negativo = exceso). */
+    val unassigned: Long
+        get() = runCatching { toReceipt().totals.total }.getOrDefault(0) -
+            payments.sumOf { Clp.parse(it.amount) ?: 0 }
 
     val validation: ReceiptValidator.Result get() = ReceiptValidator.validate(toReceipt())
 
     /** Contenido comparable para saber si hay cambios sin guardar. */
     fun contentKey(): Any = listOf(
         dateTime, status, items.map { listOf(it.name, it.description, it.quantity, it.unitPrice) },
-        discount, method, reference, clientName, clientPhone, clientEmail,
+        discount, payments.map { listOf(it.method, it.amount, it.reference) }, clientName, clientPhone, clientEmail, clientRut,
     )
 }
 
@@ -119,18 +146,26 @@ class EditorViewModel(
                         )
                     }.ifEmpty { listOf(ItemForm(key = nextKey++)) },
                     discount = draft.discount.takeIf { it > 0 }?.toString().orEmpty(),
-                    method = draft.paymentMethod,
-                    reference = draft.paymentReference,
+                    payments = draft.payments.map { part ->
+                        PaymentForm(
+                            key = nextKey++,
+                            method = part.method,
+                            amount = if (draft.payments.size > 1) part.amount.takeIf { it > 0 }?.toString().orEmpty() else "",
+                            reference = part.reference,
+                        )
+                    }.ifEmpty { listOf(PaymentForm(key = nextKey++, method = PaymentMethod.TRANSFER)) },
+                    reservedNumber = draft.reservedNumber,
                     clientName = draft.client.name,
                     clientPhone = draft.client.phone,
                     clientEmail = draft.client.email,
+                    clientRut = draft.client.rut,
                     sellerConfigured = configured,
                 ).also { savedKey = it.contentKey() }
             } else {
                 EditorUiState(
                     loading = false,
                     nextNumber = next,
-                    method = seller.lastPaymentMethod.first(),
+                    payments = listOf(PaymentForm(key = nextKey++, method = seller.lastPaymentMethod.first())),
                     sellerConfigured = configured,
                 ).also { savedKey = it.contentKey() }
             }
@@ -158,11 +193,64 @@ class EditorViewModel(
     fun setTime(time: LocalTime) = _state.update { it.copy(dateTime = LocalDateTime.of(it.dateTime.toLocalDate(), time)) }
     fun setStatus(status: PaymentStatus) = _state.update { it.copy(status = status) }
     fun setDiscount(value: String) = _state.update { it.copy(discount = value) }
-    fun setMethod(method: PaymentMethod) = _state.update { it.copy(method = method) }
-    fun setReference(value: String) = _state.update { it.copy(reference = value.take(60)) }
+    private fun updatePayment(key: Long, transform: (PaymentForm) -> PaymentForm) = _state.update { s ->
+        s.copy(payments = s.payments.map { if (it.key == key) transform(it) else it })
+    }
+
+    /** Cambia el medio de una parte. Si otra parte ya lo usaba, intercambian medios. */
+    fun setPaymentMethod(key: Long, method: PaymentMethod) = _state.update { s ->
+        val current = s.payments.firstOrNull { it.key == key }?.method ?: return@update s
+        s.copy(
+            payments = s.payments.map {
+                when {
+                    it.key == key -> it.copy(method = method)
+                    it.method == method -> it.copy(method = current)
+                    else -> it
+                }
+            },
+        )
+    }
+
+    fun setPaymentAmount(key: Long, value: String) = updatePayment(key) { it.copy(amount = value) }
+    fun setPaymentReference(key: Long, value: String) = updatePayment(key) { it.copy(reference = value.take(60)) }
+
+    /** Asigna a esta parte lo que falta para completar el total. */
+    fun fillRemaining(key: Long) = _state.update { s ->
+        val missing = s.unassigned
+        if (missing == 0L) return@update s
+        s.copy(
+            payments = s.payments.map {
+                if (it.key != key) it
+                else it.copy(amount = ((Clp.parse(it.amount) ?: 0) + missing).coerceAtLeast(0).takeIf { v -> v > 0 }?.toString().orEmpty())
+            },
+        )
+    }
+
+    /** Agrega otro medio de pago (máximo 3, sin repetir). */
+    fun addPaymentPart() = _state.update { s ->
+        if (s.payments.size >= ReceiptValidator.MAX_PAYMENT_PARTS) return@update s
+        val unused = PaymentMethod.entries.firstOrNull { m -> s.payments.none { it.method == m } } ?: return@update s
+        val total = runCatching { s.toReceipt().totals.total }.getOrDefault(0)
+        // Al pasar de 1 a 2 medios, el primero conserva el total para que el vendedor lo reparta.
+        val base = if (s.payments.size == 1) {
+            s.payments.map { it.copy(amount = total.takeIf { t -> t > 0 }?.toString().orEmpty()) }
+        } else {
+            s.payments
+        }
+        s.copy(payments = base + PaymentForm(key = nextKey++, method = unused))
+    }
+
+    fun removePaymentPart(key: Long) = _state.update { s ->
+        val remaining = s.payments.filterNot { it.key == key }
+        if (remaining.isEmpty()) return@update s
+        s.copy(payments = if (remaining.size == 1) remaining.map { it.copy(amount = "") } else remaining)
+    }
     fun setClientName(value: String) = _state.update { it.copy(clientName = value.take(80)) }
     fun setClientPhone(value: String) = _state.update { it.copy(clientPhone = value.filter { c -> c.isDigit() || c in "+ " }.take(20)) }
     fun setClientEmail(value: String) = _state.update { it.copy(clientEmail = value.trim().take(80)) }
+    fun setClientRut(value: String) = _state.update {
+        it.copy(clientRut = value.uppercase().filter { c -> c.isDigit() || c == 'K' || c == '.' || c == '-' }.take(12))
+    }
 
     /** Valida, guarda el borrador y abre la vista previa. */
     fun preview() {
@@ -194,7 +282,7 @@ class EditorViewModel(
         return try {
             val snapshot = _state.value
             val id = receipts.saveDraft(snapshot.toReceipt())
-            seller.rememberPaymentMethod(snapshot.method)
+            seller.rememberPaymentMethod(snapshot.payments.first().method)
             _state.update { it.copy(draftId = id, busy = false) }
             savedKey = snapshot.contentKey()
             id

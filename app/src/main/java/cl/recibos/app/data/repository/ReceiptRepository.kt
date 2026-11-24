@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import cl.recibos.app.data.local.AppDatabase
 import cl.recibos.app.data.local.CounterEntity
 import cl.recibos.app.data.local.itemEntities
+import cl.recibos.app.data.local.paymentEntities
 import cl.recibos.app.data.local.toDomain
 import cl.recibos.app.data.local.toEntity
 import cl.recibos.app.data.local.toEpochMillis
@@ -52,16 +53,25 @@ class ReceiptRepository(
                 receipt.copy(isDraft = true, number = null, createdAt = now, updatedAt = now).toEntity(),
             )
             dao.insertItems(receipt.itemEntities(id))
+            dao.insertPayments(receipt.paymentEntities(id))
             id
         } else {
             val existing = dao.getById(receipt.id) ?: error("El borrador ya no existe.")
             check(existing.receipt.isDraft) { "Un comprobante emitido no puede editarse." }
             dao.updateReceipt(
-                receipt.copy(isDraft = true, number = null, createdAt = existing.receipt.createdAt, updatedAt = now)
+                receipt.copy(
+                    isDraft = true,
+                    number = null,
+                    reservedNumber = existing.receipt.reservedNumber,
+                    createdAt = existing.receipt.createdAt,
+                    updatedAt = now,
+                )
                     .toEntity(),
             )
             dao.deleteItems(receipt.id)
             dao.insertItems(receipt.itemEntities(receipt.id))
+            dao.deletePayments(receipt.id)
+            dao.insertPayments(receipt.paymentEntities(receipt.id))
             receipt.id
         }
     }
@@ -78,11 +88,14 @@ class ReceiptRepository(
         val validation = ReceiptValidator.validate(draft)
         check(validation.isValid) { validation.firstMessage ?: "Datos incompletos." }
 
-        val number = currentCounter() + 1
-        dao.setCounter(CounterEntity(COUNTER_NAME, number))
+        val counter = currentCounter()
+        // Un borrador que rehace un comprobante borrado recupera su número, si sigue libre.
+        val number = draft.reservedNumber?.takeIf { it > 0 && dao.countWithNumber(it) == 0 } ?: (counter + 1)
+        dao.setCounter(CounterEntity(COUNTER_NAME, maxOf(counter, number)))
         val now = clock()
         val issued = draft.copy(
             number = number,
+            reservedNumber = null,
             isDraft = false,
             seller = seller,
             issuedAt = now,
@@ -90,6 +103,8 @@ class ReceiptRepository(
             statusChangedAt = now,
         )
         dao.updateReceipt(issued.toEntity())
+        dao.deletePayments(issued.id)
+        dao.insertPayments(issued.paymentEntities(issued.id))
         issued
     }
 
@@ -103,7 +118,47 @@ class ReceiptRepository(
         check(it.status != PaymentStatus.VOID) { "El comprobante ya está anulado." }
     }
 
-    suspend fun deleteDraft(id: Long): Boolean = dao.deleteDraft(id) > 0
+    /**
+     * Elimina un borrador. Si reservaba el último número emitido, ese número vuelve a quedar
+     * disponible para el próximo comprobante.
+     */
+    suspend fun deleteDraft(id: Long): Boolean = db.withTransaction {
+        val draft = dao.getById(id)?.receipt ?: return@withTransaction false
+        if (!draft.isDraft) return@withTransaction false
+        dao.deleteDraft(id)
+        releaseIfLast(draft.reservedNumber)
+        true
+    }
+
+    /**
+     * Borra un comprobante emitido y crea un borrador con sus mismos datos que, al emitirse,
+     * recupera el mismo número. Sirve para corregir un comprobante sin saltarse la numeración.
+     * Devuelve el id del nuevo borrador.
+     */
+    suspend fun deleteAndRedo(id: Long): Long = db.withTransaction {
+        val receipt = dao.getById(id)?.toDomain() ?: error("El comprobante ya no existe.")
+        check(!receipt.isDraft) { "Un borrador se edita directamente." }
+        val number = checkNotNull(receipt.number)
+        dao.deleteReceipt(id)
+        saveDraft(
+            Receipt(
+                dateTime = receipt.dateTime,
+                status = if (receipt.status == PaymentStatus.VOID) PaymentStatus.PAID else receipt.status,
+                client = receipt.client,
+                items = receipt.items,
+                discount = receipt.discount,
+                payments = receipt.payments,
+                reservedNumber = number,
+            ),
+        )
+    }
+
+    private suspend fun releaseIfLast(number: Int?) {
+        if (number == null) return
+        val counter = dao.getCounter(COUNTER_NAME) ?: return
+        val max = dao.maxNumber() ?: 0
+        if (number == counter && max < number) dao.setCounter(CounterEntity(COUNTER_NAME, max))
+    }
 
     /** Crea un nuevo borrador a partir de un comprobante existente, con fecha actual. */
     suspend fun duplicateAsDraft(id: Long, now: LocalDateTime = LocalDateTime.now()): Long {
@@ -116,7 +171,7 @@ class ReceiptRepository(
                 client = source.client,
                 items = source.items,
                 discount = source.discount,
-                paymentMethod = source.paymentMethod,
+                payments = source.payments,
             ),
         )
     }

@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import cl.recibos.app.domain.model.ClientInfo
 import cl.recibos.app.domain.model.PaymentMethod
+import cl.recibos.app.domain.model.PaymentPart
 import cl.recibos.app.domain.model.PaymentStatus
 import cl.recibos.app.domain.model.Receipt
 import cl.recibos.app.domain.model.ReceiptAccent
@@ -37,14 +38,13 @@ class ReceiptExportTest {
         isDraft = false,
         dateTime = LocalDateTime.of(2026, 11, 23, 15, 42),
         status = status,
-        client = ClientInfo(name = "Camila Rojas"),
+        client = ClientInfo(name = "Camila Rojas", rut = "12.345.678-5"),
         items = List(items) { i ->
             if (i == 0) ReceiptItem("Scooter eléctrico", "Modelo E9", 1, 215_000)
             else ReceiptItem("Accesorio $i", "Casco · talla M", 2, 12_990)
         },
         discount = discount,
-        paymentMethod = PaymentMethod.TRANSFER,
-        paymentReference = "OP-48213",
+        payments = listOf(PaymentPart(PaymentMethod.TRANSFER, reference = "OP-48213")),
         seller = SellerSnapshot(
             name = "Movilidad Sur",
             phone = "+56 9 8765 4321",
@@ -109,6 +109,21 @@ class ReceiptExportTest {
         val again = exporter.exportToCache(sample(), ExportFormat.PNG)
         assertEquals(file.absolutePath, again.absolutePath)
         assertEquals(1, file.parentFile!!.listFiles()!!.count { it.name.startsWith("RECIBO-0001") && it.extension == "png" })
+    }
+
+    @Test fun `muestra con pago dividido en dos medios`() {
+        val split = sample(items = 1).copy(
+            payments = listOf(
+                PaymentPart(PaymentMethod.TRANSFER, 150_000, "OP-48213"),
+                PaymentPart(PaymentMethod.CASH, 65_000),
+            ),
+        )
+        val renderer = ReceiptRenderer()
+        val single = renderer.layout(sample()).contentHeight
+        assertTrue("el detalle de pago agrega filas", renderer.layout(split).contentHeight > single)
+        val out = ByteArrayOutputStream()
+        exporter.write(split, ExportFormat.PNG, out)
+        saveSample("muestra-pago-dividido.png", out.toByteArray())
     }
 
     /** Guarda muestras visuales en app/build/receipt-samples para revisarlas a mano. */

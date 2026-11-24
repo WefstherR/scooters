@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import cl.recibos.app.domain.model.ClientInfo
 import cl.recibos.app.domain.model.PaymentMethod
+import cl.recibos.app.domain.model.PaymentPart
 import cl.recibos.app.domain.model.PaymentStatus
 import cl.recibos.app.domain.model.Receipt
 import cl.recibos.app.domain.model.ReceiptItem
@@ -31,7 +32,7 @@ class ReceiptPdfInstrumentedTest {
         status = PaymentStatus.PAID,
         client = ClientInfo(name = "Camila Rojas"),
         items = List(items) { i -> ReceiptItem(if (i == 0) "Scooter eléctrico" else "Accesorio $i", "Modelo E9", 1, 215_000) },
-        paymentMethod = PaymentMethod.TRANSFER,
+        payments = listOf(PaymentPart(PaymentMethod.TRANSFER)),
         seller = SellerSnapshot(name = "Movilidad Sur"),
     )
 
